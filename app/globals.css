@@ -663,6 +663,18 @@ body {
   text-align: right;
 }
 
+.hud-description {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+  font-style: italic;
+  margin-top: 2px;
+}
+
 .hud-center {
   text-align: center;
   padding: 0 20px;

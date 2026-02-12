@@ -42,6 +42,7 @@ export default function Hud({ gameState }: HudProps) {
                     />
                 </div>
                 <span className="hud-hp">{Math.ceil(bot1.health)} HP</span>
+                <div className="hud-description">{bot1.definition.strategyDescription}</div>
             </div>
 
             <div className="hud-center">
@@ -73,6 +74,7 @@ export default function Hud({ gameState }: HudProps) {
                     />
                 </div>
                 <span className="hud-hp">{Math.ceil(bot2.health)} HP</span>
+                <div className="hud-description">{bot2.definition.strategyDescription}</div>
             </div>
         </div>
     );
