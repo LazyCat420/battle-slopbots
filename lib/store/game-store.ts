@@ -61,6 +61,8 @@ interface GameStore {
     setGameState: (state: GameState | null) => void;
     resetMatch: () => void;
     generateBot: (player: 1 | 2) => Promise<void>;
+    randomizeBot: (player: 1 | 2) => Promise<void>;
+    cancelGeneration: (player: 1 | 2) => void;
 }
 
 const initialPlayerState: PlayerState = {
@@ -69,6 +71,12 @@ const initialPlayerState: PlayerState = {
     isGenerating: false,
     error: null,
     locked: false,
+};
+
+// ── Abort controllers for in-flight generation requests ──
+const abortControllers: { 1: AbortController | null; 2: AbortController | null } = {
+    1: null,
+    2: null,
 };
 
 export const useGameStore = create<GameStore>((set, get) => ({
@@ -114,6 +122,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
             return;
         }
 
+        // Cancel any in-flight generation for this player
+        abortControllers[player]?.abort();
+        const controller = new AbortController();
+        abortControllers[player] = controller;
+
         // Set generating state
         set((s) => ({
             [key]: {
@@ -132,6 +145,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     description: playerState.description,
                     llmConfig: state.llmConfig,
                 }),
+                signal: controller.signal,
             });
 
             const data = await response.json();
@@ -151,6 +165,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
                 },
             }));
         } catch (err: unknown) {
+            if (err instanceof DOMException && err.name === "AbortError") {
+                // User cancelled — silently stop
+                return;
+            }
             const errMsg = err instanceof Error ? err.message : String(err);
             set((s) => ({
                 [key]: {
@@ -159,6 +177,96 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     error: errMsg,
                 },
             }));
+        } finally {
+            abortControllers[player] = null;
         }
+    },
+
+    randomizeBot: async (player) => {
+        const state = get();
+        const key = player === 1 ? "player1" : "player2";
+        const otherKey = player === 1 ? "player2" : "player1";
+
+        // Gather names to avoid (the other bot's name if it exists)
+        const otherBot = state[otherKey].bot;
+        const avoidNames = otherBot ? [otherBot.name] : [];
+
+        // Cancel any in-flight generation for this player
+        abortControllers[player]?.abort();
+        const controller = new AbortController();
+        abortControllers[player] = controller;
+
+        // Set generating state
+        set((s) => ({
+            [key]: {
+                ...s[key === "player1" ? "player1" : "player2"],
+                isGenerating: true,
+                error: null,
+                bot: null,
+                description: "🎲 Randomizing...",
+            },
+        }));
+
+        try {
+            const response = await fetch("/api/generate-bot", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    randomize: true,
+                    llmConfig: state.llmConfig,
+                    avoidNames,
+                }),
+                signal: controller.signal,
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || "Failed to generate bot");
+            }
+
+            set((s) => ({
+                [key]: {
+                    ...s[key === "player1" ? "player1" : "player2"],
+                    bot: data.bot,
+                    isGenerating: false,
+                    description: data.bot?.strategyDescription || "Random bot",
+                    error: data.fallback
+                        ? "LLM failed — using default bot."
+                        : null,
+                },
+            }));
+        } catch (err: unknown) {
+            if (err instanceof DOMException && err.name === "AbortError") {
+                return;
+            }
+            const errMsg = err instanceof Error ? err.message : String(err);
+            set((s) => ({
+                [key]: {
+                    ...s[key === "player1" ? "player1" : "player2"],
+                    isGenerating: false,
+                    description: "",
+                    error: errMsg,
+                },
+            }));
+        } finally {
+            abortControllers[player] = null;
+        }
+    },
+
+    cancelGeneration: (player) => {
+        const key = player === 1 ? "player1" : "player2";
+        abortControllers[player]?.abort();
+        abortControllers[player] = null;
+        set((s) => ({
+            [key]: {
+                ...s[key === "player1" ? "player1" : "player2"],
+                isGenerating: false,
+                error: null,
+                description: s[key === "player1" ? "player1" : "player2"].description === "🎲 Randomizing..."
+                    ? ""
+                    : s[key === "player1" ? "player1" : "player2"].description,
+            },
+        }));
     },
 }));

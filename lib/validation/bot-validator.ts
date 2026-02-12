@@ -206,14 +206,34 @@ function sanitizeDrawCode(code: string | undefined): string | undefined {
     }
 
     // Cap length
-    const trimmed = code.slice(0, 600);
+    let sanitized = code.slice(0, 1200);
+
+    // Log raw input for debugging
+    console.log(`[validator] drawCode raw input (${code.length} chars): ${code.slice(0, 200)}...`);
+
+    // Fix common LLM encoding issues
+    const beforeSanitize = sanitized;
+    sanitized = sanitized
+        .replace(/&gt;/g, ">")
+        .replace(/&lt;/g, "<")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#x27;/g, "'");
+
+    if (sanitized !== beforeSanitize) {
+        console.log(`[validator] drawCode had HTML entities — sanitized`);
+    }
 
     // Syntax check — try to compile as a function
     try {
-        new Function("ctx", "size", "color", "tick", trimmed);
-        return trimmed;
-    } catch {
-        console.warn(`[validator] drawCode syntax invalid, falling back to shape rendering`);
+        new Function("ctx", "size", "color", "tick", sanitized);
+        console.log(`[validator] ✅ drawCode compiled OK (${sanitized.length} chars)`);
+        return sanitized;
+    } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[validator] ❌ drawCode syntax invalid: ${msg}`);
+        console.warn(`[validator] ❌ drawCode that failed: ${sanitized.slice(0, 300)}`);
         return undefined;
     }
 }

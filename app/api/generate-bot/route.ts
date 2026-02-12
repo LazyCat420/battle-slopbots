@@ -6,7 +6,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { LLMConfig } from "@/lib/types/bot";
-import { buildBotPrompt } from "@/lib/llm/prompt";
+import { buildBotPrompt, buildRandomBotPrompt } from "@/lib/llm/prompt";
 import { callLLM, extractJSON } from "@/lib/llm/provider";
 import {
     validateBotDefinition,
@@ -18,12 +18,14 @@ const MAX_RETRIES = 5;
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
-        const { description, llmConfig } = body as {
-            description: string;
+        const { description, llmConfig, randomize, avoidNames } = body as {
+            description?: string;
             llmConfig: LLMConfig;
+            randomize?: boolean;
+            avoidNames?: string[];
         };
 
-        if (!description || typeof description !== "string") {
+        if (!randomize && (!description || typeof description !== "string")) {
             return NextResponse.json(
                 { error: "Missing or invalid 'description' field" },
                 { status: 400 }
@@ -46,7 +48,9 @@ export async function POST(request: NextRequest) {
 
             try {
                 // Build the prompt (includes error feedback on retries)
-                const { system, user } = buildBotPrompt(description, lastError);
+                const { system, user } = randomize
+                    ? buildRandomBotPrompt(lastError, avoidNames)
+                    : buildBotPrompt(description!, lastError);
                 console.log(`[generate-bot] Prompt size: system=${system.length} user=${user.length} total=${system.length + user.length} chars`);
 
                 // Call the LLM
@@ -81,6 +85,20 @@ export async function POST(request: NextRequest) {
                     continue;
                 }
                 console.log(`[generate-bot] ✅ Schema valid: "${validation.sanitized!.name}" shape=${validation.sanitized!.shape} weapon=${validation.sanitized!.weapon.type}`);
+
+                // Log drawCode diagnostic
+                const rawDef = parsed as Record<string, unknown>;
+                if (rawDef.drawCode) {
+                    console.log(`[generate-bot] 🎨 Raw drawCode length: ${String(rawDef.drawCode).length}`);
+                    console.log(`[generate-bot] 🎨 Raw drawCode preview: ${String(rawDef.drawCode).slice(0, 300)}`);
+                }
+                if (validation.sanitized!.drawCode) {
+                    console.log(`[generate-bot] ✅ drawCode passed validation (${validation.sanitized!.drawCode.length} chars)`);
+                } else if (rawDef.drawCode) {
+                    console.log(`[generate-bot] ❌ drawCode was generated but FAILED validation — falling back to shape renderer`);
+                } else {
+                    console.log(`[generate-bot] ⚠️ LLM did not generate drawCode`);
+                }
 
                 // Check behavior code syntax
                 const syntaxCheck = checkBehaviorSyntax(validation.sanitized!.behaviorCode);

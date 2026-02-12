@@ -248,17 +248,24 @@ export default function SettingsModal({
                         <label>
                             Model
                             {canFetchModels && (
-                                <button
-                                    className="btn-inline"
-                                    onClick={fetchModels}
-                                    disabled={isLoadingModels}
-                                >
-                                    {isLoadingModels ? "⏳ Loading..." : "🔄 Refresh"}
-                                </button>
+                                <>
+                                    <button
+                                        className="btn-inline"
+                                        onClick={fetchModels}
+                                        disabled={isLoadingModels}
+                                    >
+                                        {isLoadingModels ? "⏳ Loading..." : "🔄 Refresh"}
+                                    </button>
+                                    {models.length > 0 && (
+                                        <span className="model-count">
+                                            {models.length} model{models.length !== 1 ? "s" : ""} available
+                                        </span>
+                                    )}
+                                </>
                             )}
                         </label>
 
-                        {/* Dropdown for providers that support model listing */}
+                        {/* Dropdown when models are loaded */}
                         {canFetchModels && models.length > 0 ? (
                             <select
                                 className="model-select"
@@ -283,7 +290,11 @@ export default function SettingsModal({
                                 onChange={(e) =>
                                     onChange({ ...config, model: e.target.value })
                                 }
-                                placeholder={DEFAULT_CONFIGS[config.provider]?.model || "model-name"}
+                                placeholder={
+                                    canFetchModels
+                                        ? "Click Refresh to load models, or type manually"
+                                        : DEFAULT_CONFIGS[config.provider]?.model || "model-name"
+                                }
                             />
                         )}
 

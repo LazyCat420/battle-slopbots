@@ -24,6 +24,33 @@ const SIZE_TO_RADIUS: Record<number, number> = {
     5: 35,
 };
 
+// ── Compiled drawCode cache ──────────────────────────────
+// Maps drawCode string → compiled Function (or null if compilation failed).
+// Avoids re-compiling every frame.
+const drawCodeCache = new Map<string, ((ctx: CanvasRenderingContext2D, size: number, color: string, tick: number) => void) | null>();
+
+function getCompiledDrawCode(code: string): ((ctx: CanvasRenderingContext2D, size: number, color: string, tick: number) => void) | null {
+    if (drawCodeCache.has(code)) return drawCodeCache.get(code)!;
+    try {
+        const fn = new Function("ctx", "size", "color", "tick", code) as (ctx: CanvasRenderingContext2D, size: number, color: string, tick: number) => void;
+        drawCodeCache.set(code, fn);
+        return fn;
+    } catch {
+        console.warn("[ArenaCanvas] drawCode compilation failed, using fallback");
+        drawCodeCache.set(code, null);
+        return null;
+    }
+}
+
+// ── Color utility — lighten/darken a hex color ───────────
+function shadeColor(hex: string, percent: number): string {
+    const num = parseInt(hex.replace("#", ""), 16);
+    const r = Math.min(255, Math.max(0, ((num >> 16) & 0xff) + Math.round(255 * percent)));
+    const g = Math.min(255, Math.max(0, ((num >> 8) & 0xff) + Math.round(255 * percent)));
+    const b = Math.min(255, Math.max(0, (num & 0xff) + Math.round(255 * percent)));
+    return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
 export default function ArenaCanvas({ gameState, countdown }: ArenaCanvasProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const particlesRef = useRef<EffectParticle[]>([]);
@@ -52,8 +79,26 @@ export default function ArenaCanvas({ gameState, countdown }: ArenaCanvasProps) 
             const { position, angle, definition, isAttacking } = bot;
             const radius = SIZE_TO_RADIUS[Math.round(definition.size)] || 25;
 
+            // ── Hover shadow (drawn before bot for depth) ────
+            ctx.save();
+            ctx.translate(position.x, position.y + radius * 0.6);
+            ctx.scale(1, 0.3);
+            const shadowGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius * 1.2);
+            shadowGrad.addColorStop(0, 'rgba(0,0,0,0.25)');
+            shadowGrad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = shadowGrad;
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 1.2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+
             ctx.save();
             ctx.translate(position.x, position.y);
+
+            // ── Breathing pulse (subtle scale oscillation) ───
+            const breathe = 1 + Math.sin(tick * 0.04 + playerIndex * Math.PI) * 0.025;
+            ctx.scale(breathe, breathe);
+
             ctx.rotate(angle);
 
             // Glow effect when attacking — uses attackEffect colors
@@ -62,47 +107,189 @@ export default function ArenaCanvas({ gameState, countdown }: ArenaCanvasProps) 
                 ctx.shadowBlur = 15 + definition.attackEffect.intensity * 3;
             }
 
-            // Bot body
-            ctx.fillStyle = definition.color;
-            ctx.strokeStyle = "rgba(255,255,255,0.4)";
-            ctx.lineWidth = 2;
-
-            ctx.beginPath();
-            switch (definition.shape) {
-                case "circle":
-                    ctx.arc(0, 0, radius, 0, Math.PI * 2);
-                    break;
-                case "rectangle":
-                    ctx.rect(-radius, -radius * 0.8, radius * 2, radius * 1.6);
-                    break;
-                case "triangle":
-                    for (let i = 0; i < 3; i++) {
-                        const a = (i * 2 * Math.PI) / 3 - Math.PI / 2;
-                        if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
-                        else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
+            // ── Try LLM drawCode first ───────────────────────
+            let drawCodeRendered = false;
+            if (definition.drawCode) {
+                const fn = getCompiledDrawCode(definition.drawCode);
+                if (fn) {
+                    try {
+                        ctx.save();
+                        fn(ctx, radius, definition.color, tick);
+                        ctx.restore();
+                        drawCodeRendered = true;
+                        // Log once on first successful render
+                        if (tick === 1) console.log(`[ArenaCanvas] ✅ drawCode rendering for "${definition.name}"`);
+                    } catch (e) {
+                        // Runtime error — fall through to built-in renderer
+                        ctx.restore();
+                        if (tick === 1) console.warn(`[ArenaCanvas] ❌ drawCode runtime error for "${definition.name}":`, e);
                     }
-                    ctx.closePath();
-                    break;
-                case "pentagon":
-                    for (let i = 0; i < 5; i++) {
-                        const a = (i * 2 * Math.PI) / 5 - Math.PI / 2;
-                        if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
-                        else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
-                    }
-                    ctx.closePath();
-                    break;
-                case "hexagon":
-                    for (let i = 0; i < 6; i++) {
-                        const a = (i * 2 * Math.PI) / 6;
-                        if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
-                        else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
-                    }
-                    ctx.closePath();
-                    break;
+                } else if (tick === 1) {
+                    console.warn(`[ArenaCanvas] ❌ drawCode compilation failed for "${definition.name}", using fallback`);
+                }
+            } else if (tick === 1) {
+                console.log(`[ArenaCanvas] ⚠️ No drawCode for "${definition.name}", using built-in renderer`);
             }
-            ctx.fill();
-            ctx.stroke();
+
+            // ── Premium fallback shape renderer ──────────────
+            if (!drawCodeRendered) {
+                const color = definition.color;
+                const lighter = shadeColor(color, 0.25);
+                const darker = shadeColor(color, -0.25);
+
+                // Radial gradient fill
+                const grad = ctx.createRadialGradient(0, -radius * 0.2, radius * 0.15, 0, 0, radius);
+                grad.addColorStop(0, lighter);
+                grad.addColorStop(0.6, color);
+                grad.addColorStop(1, darker);
+                ctx.fillStyle = grad;
+
+                // Metallic rim
+                ctx.strokeStyle = shadeColor(color, 0.4);
+                ctx.lineWidth = 2.5;
+
+                // Draw shape path
+                ctx.beginPath();
+                switch (definition.shape) {
+                    case "circle":
+                        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+                        break;
+                    case "rectangle":
+                        ctx.rect(-radius, -radius * 0.8, radius * 2, radius * 1.6);
+                        break;
+                    case "triangle":
+                        for (let i = 0; i < 3; i++) {
+                            const a = (i * 2 * Math.PI) / 3 - Math.PI / 2;
+                            if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
+                            else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
+                        }
+                        ctx.closePath();
+                        break;
+                    case "pentagon":
+                        for (let i = 0; i < 5; i++) {
+                            const a = (i * 2 * Math.PI) / 5 - Math.PI / 2;
+                            if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
+                            else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
+                        }
+                        ctx.closePath();
+                        break;
+                    case "hexagon":
+                        for (let i = 0; i < 6; i++) {
+                            const a = (i * 2 * Math.PI) / 6;
+                            if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
+                            else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
+                        }
+                        ctx.closePath();
+                        break;
+                }
+                ctx.fill();
+                ctx.stroke();
+
+                // Inner panel details (shape-specific structural lines)
+                ctx.strokeStyle = `rgba(255,255,255,0.12)`;
+                ctx.lineWidth = 1;
+                switch (definition.shape) {
+                    case "circle": {
+                        // Concentric inner ring + cross hatch
+                        ctx.beginPath();
+                        ctx.arc(0, 0, radius * 0.55, 0, Math.PI * 2);
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.moveTo(-radius * 0.4, 0);
+                        ctx.lineTo(radius * 0.4, 0);
+                        ctx.moveTo(0, -radius * 0.4);
+                        ctx.lineTo(0, radius * 0.4);
+                        ctx.stroke();
+                        break;
+                    }
+                    case "rectangle": {
+                        // Armor plate seams
+                        ctx.beginPath();
+                        ctx.moveTo(-radius * 0.3, -radius * 0.8);
+                        ctx.lineTo(-radius * 0.3, radius * 0.8);
+                        ctx.moveTo(radius * 0.3, -radius * 0.8);
+                        ctx.lineTo(radius * 0.3, radius * 0.8);
+                        ctx.moveTo(-radius, 0);
+                        ctx.lineTo(radius, 0);
+                        ctx.stroke();
+                        // Bolt dots
+                        ctx.fillStyle = "rgba(255,255,255,0.2)";
+                        for (const bx of [-radius * 0.7, radius * 0.7]) {
+                            for (const by of [-radius * 0.5, radius * 0.5]) {
+                                ctx.beginPath();
+                                ctx.arc(bx, by, 2, 0, Math.PI * 2);
+                                ctx.fill();
+                            }
+                        }
+                        break;
+                    }
+                    case "triangle": {
+                        // Inner chevron
+                        ctx.beginPath();
+                        ctx.moveTo(0, -radius * 0.35);
+                        ctx.lineTo(-radius * 0.3, radius * 0.2);
+                        ctx.lineTo(radius * 0.3, radius * 0.2);
+                        ctx.closePath();
+                        ctx.stroke();
+                        break;
+                    }
+                    case "pentagon": {
+                        // Star pattern inside
+                        ctx.beginPath();
+                        for (let i = 0; i < 5; i++) {
+                            const a1 = (i * 2 * Math.PI) / 5 - Math.PI / 2;
+                            const a2 = (((i + 2) % 5) * 2 * Math.PI) / 5 - Math.PI / 2;
+                            ctx.moveTo(Math.cos(a1) * radius * 0.5, Math.sin(a1) * radius * 0.5);
+                            ctx.lineTo(Math.cos(a2) * radius * 0.5, Math.sin(a2) * radius * 0.5);
+                        }
+                        ctx.stroke();
+                        break;
+                    }
+                    case "hexagon": {
+                        // Inner hexagon + center dot
+                        ctx.beginPath();
+                        for (let i = 0; i < 6; i++) {
+                            const a = (i * 2 * Math.PI) / 6;
+                            if (i === 0) ctx.moveTo(Math.cos(a) * radius * 0.5, Math.sin(a) * radius * 0.5);
+                            else ctx.lineTo(Math.cos(a) * radius * 0.5, Math.sin(a) * radius * 0.5);
+                        }
+                        ctx.closePath();
+                        ctx.stroke();
+                        ctx.fillStyle = lighter;
+                        ctx.globalAlpha = 0.3;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, radius * 0.12, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.globalAlpha = 1;
+                        break;
+                    }
+                }
+
+                // Weapon mount indicator at front
+                ctx.fillStyle = shadeColor(color, 0.5);
+                ctx.beginPath();
+                ctx.arc(radius * 0.75, 0, radius * 0.12, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
             ctx.shadowBlur = 0;
+
+            // ── Energy aura (HP-based glow ring) ─────────────
+            const hpFraction = bot.health / 100;
+            const auraAlpha = 0.12 + hpFraction * 0.15;
+            const auraPulse = 1 + Math.sin(tick * 0.06) * 0.08;
+            ctx.globalCompositeOperation = 'lighter';
+            const auraGrad = ctx.createRadialGradient(0, 0, radius * 0.8, 0, 0, radius * 1.4 * auraPulse);
+            auraGrad.addColorStop(0, 'transparent');
+            auraGrad.addColorStop(0.6, definition.color);
+            auraGrad.addColorStop(1, 'transparent');
+            ctx.fillStyle = auraGrad;
+            ctx.globalAlpha = auraAlpha;
+            ctx.beginPath();
+            ctx.arc(0, 0, radius * 1.4 * auraPulse, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.globalCompositeOperation = 'source-over';
 
             // Direction indicator (front arrow)
             ctx.fillStyle = "rgba(255,255,255,0.8)";
@@ -175,12 +362,13 @@ export default function ArenaCanvas({ gameState, countdown }: ArenaCanvasProps) 
                 ARENA_WIDTH * 0.6
             );
             bgGrad.addColorStop(0, "#1a1a2e");
-            bgGrad.addColorStop(1, "#0d0d1a");
+            bgGrad.addColorStop(1, "#0a0a16");
             ctx.fillStyle = bgGrad;
             ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
 
-            // Grid lines
-            ctx.strokeStyle = "rgba(255,255,255,0.03)";
+            // Pulsing grid lines
+            const gridPulse = 0.03 + Math.sin(tick * 0.02) * 0.01;
+            ctx.strokeStyle = `rgba(74, 158, 255, ${gridPulse})`;
             ctx.lineWidth = 1;
             for (let x = 0; x < ARENA_WIDTH; x += 40) {
                 ctx.beginPath();
@@ -195,24 +383,45 @@ export default function ArenaCanvas({ gameState, countdown }: ArenaCanvasProps) 
                 ctx.stroke();
             }
 
-            // Arena border
+            // Arena border with double glow
             ctx.strokeStyle = "#4a9eff";
             ctx.lineWidth = 3;
             ctx.shadowColor = "#4a9eff";
-            ctx.shadowBlur = 10;
+            ctx.shadowBlur = 15;
             ctx.strokeRect(2, 2, ARENA_WIDTH - 4, ARENA_HEIGHT - 4);
+            // Second pass for brighter inner glow
+            ctx.globalAlpha = 0.3;
+            ctx.strokeRect(2, 2, ARENA_WIDTH - 4, ARENA_HEIGHT - 4);
+            ctx.globalAlpha = 1;
             ctx.shadowBlur = 0;
 
-            // Center circle decoration
-            ctx.strokeStyle = "rgba(74, 158, 255, 0.15)";
+            // Pulsing center circle decoration
+            const centerPulse = 0.15 + Math.sin(tick * 0.03) * 0.05;
+            ctx.strokeStyle = `rgba(74, 158, 255, ${centerPulse})`;
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.arc(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, 80, 0, Math.PI * 2);
             ctx.stroke();
+            // Inner ring
+            ctx.strokeStyle = `rgba(74, 158, 255, ${centerPulse * 0.5})`;
+            ctx.beginPath();
+            ctx.arc(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, 40, 0, Math.PI * 2);
+            ctx.stroke();
+            // Center dot
             ctx.beginPath();
             ctx.arc(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, 3, 0, Math.PI * 2);
-            ctx.fillStyle = "rgba(74, 158, 255, 0.3)";
+            ctx.fillStyle = `rgba(74, 158, 255, ${centerPulse * 2})`;
             ctx.fill();
+
+            // Vignette overlay (darker edges for dramatic focus)
+            const vignetteGrad = ctx.createRadialGradient(
+                ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH * 0.25,
+                ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH * 0.7
+            );
+            vignetteGrad.addColorStop(0, "rgba(0,0,0,0)");
+            vignetteGrad.addColorStop(1, "rgba(0,0,0,0.35)");
+            ctx.fillStyle = vignetteGrad;
+            ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
 
             if (gameState) {
                 // Draw bots with attack effects

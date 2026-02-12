@@ -24,6 +24,8 @@ export default function Home() {
     player2,
     updatePlayer,
     generateBot,
+    randomizeBot,
+    cancelGeneration,
     gameState,
     setGameState,
     llmConfig,
@@ -129,6 +131,8 @@ export default function Home() {
                   updatePlayer(1, { description: desc })
                 }
                 onGenerate={() => generateBot(1)}
+                onRandomize={() => randomizeBot(1)}
+                onCancel={() => cancelGeneration(1)}
                 onLock={() => updatePlayer(1, { locked: true })}
               />
               <div className="vs-divider">
@@ -141,6 +145,8 @@ export default function Home() {
                   updatePlayer(2, { description: desc })
                 }
                 onGenerate={() => generateBot(2)}
+                onRandomize={() => randomizeBot(2)}
+                onCancel={() => cancelGeneration(2)}
                 onLock={() => updatePlayer(2, { locked: true })}
               />
             </div>

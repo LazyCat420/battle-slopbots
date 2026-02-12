@@ -1,17 +1,16 @@
 /**
- * Game Engine — Matter.js physics + game loop for BattleBots.
+ * Game Engine — Physics-agnostic game loop for BattleBots.
  *
  * This runs the core simulation: physics, weapon hits, damage, win conditions.
- * Designed to run on the server or in-memory on the client for same-screen play.
+ * Uses the PhysicsWorld abstraction so the physics backend can be swapped
+ * without changing game logic.
  */
-import Matter from "matter-js";
 import { v4 as uuidv4 } from "uuid";
 import {
     BotDefinition,
     BotState,
     DamageEvent,
     GameState,
-    Vec2,
 } from "@/lib/types/bot";
 import {
     BotActions,
@@ -19,6 +18,8 @@ import {
     createBehaviorAPI,
     executeBehavior,
 } from "@/lib/engine/sandbox";
+import { PhysicsWorld, BodyHandle } from "@/lib/engine/physics-types";
+import { MatterAdapter } from "@/lib/engine/matter-adapter";
 
 // ── Constants ──────────────────────────────────────────────
 export const ARENA_WIDTH = 800;
@@ -39,75 +40,12 @@ const SIZE_TO_RADIUS: Record<number, number> = {
 };
 
 /**
- * Create the Matter.js body for a bot based on its definition.
- */
-function createBotBody(
-    def: BotDefinition,
-    startX: number,
-    startY: number
-): Matter.Body {
-    const radius = SIZE_TO_RADIUS[Math.round(def.size)] || 25;
-
-    let body: Matter.Body;
-
-    switch (def.shape) {
-        case "circle":
-            body = Matter.Bodies.circle(startX, startY, radius, {
-                friction: 0.1,
-                frictionAir: 0.05,
-                restitution: 0.3,
-                density: 0.01 * (1 + def.armor * 0.1),
-            });
-            break;
-        case "rectangle":
-            body = Matter.Bodies.rectangle(startX, startY, radius * 2, radius * 1.6, {
-                friction: 0.1,
-                frictionAir: 0.05,
-                restitution: 0.3,
-                density: 0.01 * (1 + def.armor * 0.1),
-            });
-            break;
-        case "triangle":
-            body = Matter.Bodies.polygon(startX, startY, 3, radius, {
-                friction: 0.1,
-                frictionAir: 0.05,
-                restitution: 0.3,
-                density: 0.01 * (1 + def.armor * 0.1),
-            });
-            break;
-        case "hexagon":
-            body = Matter.Bodies.polygon(startX, startY, 6, radius, {
-                friction: 0.1,
-                frictionAir: 0.05,
-                restitution: 0.3,
-                density: 0.01 * (1 + def.armor * 0.1),
-            });
-            break;
-        case "pentagon":
-            body = Matter.Bodies.polygon(startX, startY, 5, radius, {
-                friction: 0.1,
-                frictionAir: 0.05,
-                restitution: 0.3,
-                density: 0.01 * (1 + def.armor * 0.1),
-            });
-            break;
-        default:
-            body = Matter.Bodies.circle(startX, startY, radius, {
-                friction: 0.1,
-                frictionAir: 0.05,
-                restitution: 0.3,
-            });
-    }
-
-    return body;
-}
-
-/**
  * GameEngine — manages a full match between two bots.
+ * Uses PhysicsWorld abstraction for all physics operations.
  */
 export class GameEngine {
-    private engine: Matter.Engine;
-    private bodies: [Matter.Body, Matter.Body];
+    private physics: PhysicsWorld;
+    private bodyHandles: [BodyHandle, BodyHandle];
     private botStates: [BotState, BotState];
     private behaviorFns: [
         ((api: import("@/lib/types/bot").BehaviorAPI, tick: number) => void) | null,
@@ -122,36 +60,71 @@ export class GameEngine {
     private onStateUpdate: ((state: GameState) => void) | null = null;
 
     constructor(def1: BotDefinition, def2: BotDefinition) {
-        // Create Matter.js engine
-        this.engine = Matter.Engine.create({
-            gravity: { x: 0, y: 0, scale: 0 }, // top-down, no gravity
-        });
+        // Create physics world via adapter
+        this.physics = new MatterAdapter();
 
         // Create arena walls
-        const walls = [
-            Matter.Bodies.rectangle(ARENA_WIDTH / 2, -WALL_THICKNESS / 2, ARENA_WIDTH + WALL_THICKNESS * 2, WALL_THICKNESS, { isStatic: true }),
-            Matter.Bodies.rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT + WALL_THICKNESS / 2, ARENA_WIDTH + WALL_THICKNESS * 2, WALL_THICKNESS, { isStatic: true }),
-            Matter.Bodies.rectangle(-WALL_THICKNESS / 2, ARENA_HEIGHT / 2, WALL_THICKNESS, ARENA_HEIGHT + WALL_THICKNESS * 2, { isStatic: true }),
-            Matter.Bodies.rectangle(ARENA_WIDTH + WALL_THICKNESS / 2, ARENA_HEIGHT / 2, WALL_THICKNESS, ARENA_HEIGHT + WALL_THICKNESS * 2, { isStatic: true }),
-        ];
-        Matter.Composite.add(this.engine.world, walls);
+        this.physics.createStaticRect(
+            ARENA_WIDTH / 2, -WALL_THICKNESS / 2,
+            ARENA_WIDTH + WALL_THICKNESS * 2, WALL_THICKNESS,
+            "wall_top"
+        );
+        this.physics.createStaticRect(
+            ARENA_WIDTH / 2, ARENA_HEIGHT + WALL_THICKNESS / 2,
+            ARENA_WIDTH + WALL_THICKNESS * 2, WALL_THICKNESS,
+            "wall_bottom"
+        );
+        this.physics.createStaticRect(
+            -WALL_THICKNESS / 2, ARENA_HEIGHT / 2,
+            WALL_THICKNESS, ARENA_HEIGHT + WALL_THICKNESS * 2,
+            "wall_left"
+        );
+        this.physics.createStaticRect(
+            ARENA_WIDTH + WALL_THICKNESS / 2, ARENA_HEIGHT / 2,
+            WALL_THICKNESS, ARENA_HEIGHT + WALL_THICKNESS * 2,
+            "wall_right"
+        );
 
         // Create bot bodies — spawn on opposite sides
-        const body1 = createBotBody(def1, 150, ARENA_HEIGHT / 2);
-        const body2 = createBotBody(def2, ARENA_WIDTH - 150, ARENA_HEIGHT / 2);
-        this.bodies = [body1, body2];
-        Matter.Composite.add(this.engine.world, [body1, body2]);
+        const radius1 = SIZE_TO_RADIUS[Math.round(def1.size)] || 25;
+        const radius2 = SIZE_TO_RADIUS[Math.round(def2.size)] || 25;
+
+        const handle1 = this.physics.createBody({
+            label: "bot_0",
+            shape: def1.shape,
+            position: { x: 150, y: ARENA_HEIGHT / 2 },
+            radius: radius1,
+            density: 0.01 * (1 + def1.armor * 0.1),
+            friction: 0.1,
+            frictionAir: 0.05,
+            restitution: 0.3,
+        });
+
+        const handle2 = this.physics.createBody({
+            label: "bot_1",
+            shape: def2.shape,
+            position: { x: ARENA_WIDTH - 150, y: ARENA_HEIGHT / 2 },
+            radius: radius2,
+            density: 0.01 * (1 + def2.armor * 0.1),
+            friction: 0.1,
+            frictionAir: 0.05,
+            restitution: 0.3,
+        });
+
+        this.bodyHandles = [handle1, handle2];
 
         // Initialize bot states
         const id1 = uuidv4();
         const id2 = uuidv4();
+        const pos1 = this.physics.getPosition(handle1);
+        const pos2 = this.physics.getPosition(handle2);
 
         this.botStates = [
             {
                 id: id1,
                 definition: def1,
-                position: { x: body1.position.x, y: body1.position.y },
-                angle: body1.angle,
+                position: { x: pos1.x, y: pos1.y },
+                angle: this.physics.getAngle(handle1),
                 velocity: { x: 0, y: 0 },
                 health: BASE_HEALTH,
                 maxHealth: BASE_HEALTH,
@@ -162,8 +135,8 @@ export class GameEngine {
             {
                 id: id2,
                 definition: def2,
-                position: { x: body2.position.x, y: body2.position.y },
-                angle: body2.angle,
+                position: { x: pos2.x, y: pos2.y },
+                angle: this.physics.getAngle(handle2),
                 velocity: { x: 0, y: 0 },
                 health: BASE_HEALTH,
                 maxHealth: BASE_HEALTH,
@@ -275,20 +248,18 @@ export class GameEngine {
         }
 
         // Step physics
-        Matter.Engine.update(this.engine, TICK_INTERVAL);
+        this.physics.step(TICK_INTERVAL);
 
         // Sync state from physics
         for (let i = 0; i < 2; i++) {
             const idx = i as 0 | 1;
-            this.botStates[idx].position = {
-                x: this.bodies[idx].position.x,
-                y: this.bodies[idx].position.y,
-            };
-            this.botStates[idx].angle = this.bodies[idx].angle;
-            this.botStates[idx].velocity = {
-                x: this.bodies[idx].velocity.x,
-                y: this.bodies[idx].velocity.y,
-            };
+            const handle = this.bodyHandles[idx];
+            const pos = this.physics.getPosition(handle);
+            const vel = this.physics.getVelocity(handle);
+
+            this.botStates[idx].position = { x: pos.x, y: pos.y };
+            this.botStates[idx].angle = this.physics.getAngle(handle);
+            this.botStates[idx].velocity = { x: vel.x, y: vel.y };
 
             // Tick weapon cooldown
             if (this.botStates[idx].weaponCooldownRemaining > 0) {
@@ -322,11 +293,11 @@ export class GameEngine {
      */
     private applyActions(botIdx: 0 | 1, actions: BotActions) {
         const bot = this.botStates[botIdx];
-        const body = this.bodies[botIdx];
+        const handle = this.bodyHandles[botIdx];
         const speedMultiplier = bot.definition.speed * 0.4;
 
         if (actions.stop) {
-            Matter.Body.setVelocity(body, { x: 0, y: 0 });
+            this.physics.setVelocity(handle, { x: 0, y: 0 });
             return;
         }
 
@@ -344,12 +315,12 @@ export class GameEngine {
                 const dirY = dy / dist;
 
                 if (actions.moveAway) {
-                    Matter.Body.setVelocity(body, {
+                    this.physics.setVelocity(handle, {
                         x: -dirX * speed,
                         y: -dirY * speed,
                     });
                 } else {
-                    Matter.Body.setVelocity(body, {
+                    this.physics.setVelocity(handle, {
                         x: dirX * speed,
                         y: dirY * speed,
                     });
@@ -370,8 +341,8 @@ export class GameEngine {
                     ? angleToEnemy - Math.PI / 2
                     : angleToEnemy + Math.PI / 2;
 
-            const currentVel = body.velocity;
-            Matter.Body.setVelocity(body, {
+            const currentVel = this.physics.getVelocity(handle);
+            this.physics.setVelocity(handle, {
                 x: currentVel.x + Math.cos(strafeAngle) * speedMultiplier * 0.5,
                 y: currentVel.y + Math.sin(strafeAngle) * speedMultiplier * 0.5,
             });
@@ -379,7 +350,7 @@ export class GameEngine {
 
         // Rotation
         if (actions.rotateTarget !== null) {
-            Matter.Body.setAngle(body, actions.rotateTarget);
+            this.physics.setAngle(handle, actions.rotateTarget);
         }
 
         // Attack
@@ -395,6 +366,7 @@ export class GameEngine {
         const attacker = this.botStates[attackerIdx];
         const targetIdx = (1 - attackerIdx) as 0 | 1;
         const target = this.botStates[targetIdx];
+        const targetHandle = this.bodyHandles[targetIdx];
 
         const dx = target.position.x - attacker.position.x;
         const dy = target.position.y - attacker.position.y;
@@ -409,10 +381,10 @@ export class GameEngine {
 
             target.health = Math.max(0, target.health - damage);
 
-            // Apply knockback
+            // Apply knockback via physics abstraction
             if (dist > 0) {
                 const knockbackForce = baseDamage * 0.001;
-                Matter.Body.applyForce(this.bodies[targetIdx], this.bodies[targetIdx].position, {
+                this.physics.applyForce(targetHandle, {
                     x: (dx / dist) * knockbackForce,
                     y: (dy / dist) * knockbackForce,
                 });

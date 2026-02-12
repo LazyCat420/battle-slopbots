@@ -2,6 +2,7 @@
 
 /**
  * Bot Designer — Text input for describing a bot + preview of generated stats.
+ * Includes Randomize (LLM invents its own bot) and Cancel buttons.
  */
 import { PlayerState } from "@/lib/store/game-store";
 import { BotDefinition } from "@/lib/types/bot";
@@ -11,6 +12,8 @@ interface BotDesignerProps {
     playerState: PlayerState;
     onDescriptionChange: (desc: string) => void;
     onGenerate: () => void;
+    onRandomize: () => void;
+    onCancel: () => void;
     onLock: () => void;
     disabled?: boolean;
 }
@@ -61,6 +64,8 @@ export default function BotDesigner({
     playerState,
     onDescriptionChange,
     onGenerate,
+    onRandomize,
+    onCancel,
     onLock,
     disabled,
 }: BotDesignerProps) {
@@ -89,26 +94,45 @@ export default function BotDesigner({
                     />
 
                     <div className="designer-actions">
-                        <button
-                            className="btn btn-generate"
-                            onClick={onGenerate}
-                            disabled={isGenerating || !description.trim() || disabled}
-                        >
-                            {isGenerating ? (
-                                <>
-                                    <span className="spinner" /> Generating...
-                                </>
-                            ) : (
-                                "⚡ Generate Bot"
-                            )}
-                        </button>
+                        {isGenerating ? (
+                            <button
+                                className="btn btn-cancel"
+                                onClick={onCancel}
+                            >
+                                ✕ Cancel
+                            </button>
+                        ) : (
+                            <>
+                                <button
+                                    className="btn btn-generate"
+                                    onClick={onGenerate}
+                                    disabled={!description.trim() || disabled}
+                                >
+                                    ⚡ Generate Bot
+                                </button>
+                                <button
+                                    className="btn btn-randomize"
+                                    onClick={onRandomize}
+                                    disabled={disabled}
+                                >
+                                    🎲 Randomize
+                                </button>
+                            </>
+                        )}
 
-                        {bot && (
+                        {bot && !isGenerating && (
                             <button className="btn btn-lock" onClick={onLock}>
                                 🔒 Lock In
                             </button>
                         )}
                     </div>
+
+                    {isGenerating && (
+                        <div className="generating-indicator">
+                            <span className="spinner" />
+                            <span>AI is designing your bot...</span>
+                        </div>
+                    )}
                 </>
             )}
 

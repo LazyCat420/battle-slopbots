@@ -22,18 +22,32 @@ export async function GET(request: NextRequest) {
         let models: { id: string; name: string; type?: string; state?: string }[] = [];
 
         if (provider === "lmstudio") {
-            // LM Studio v1 API: GET /api/v1/models
-            const response = await fetch(`${baseUrl}/api/v1/models`, {
-                method: "GET",
-                headers: { "Content-Type": "application/json" },
-            });
+            // LM Studio exposes OpenAI-compatible API at /v1/models
+            // Try /v1/models first (standard), fallback to /api/v1/models (legacy)
+            let data: { data?: { id: string; type?: string; state?: string; arch?: string }[] } | null = null;
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`LM Studio API error (${response.status}): ${errorText.slice(0, 300)}`);
+            for (const endpoint of [`${baseUrl}/v1/models`, `${baseUrl}/api/v1/models`]) {
+                try {
+                    console.log(`[list-models] Trying: ${endpoint}`);
+                    const response = await fetch(endpoint, {
+                        method: "GET",
+                        headers: { "Content-Type": "application/json" },
+                        signal: AbortSignal.timeout(5000),
+                    });
+                    if (response.ok) {
+                        data = await response.json();
+                        console.log(`[list-models] ✅ Got models from ${endpoint}`);
+                        break;
+                    }
+                } catch {
+                    console.log(`[list-models] ❌ ${endpoint} failed, trying next...`);
+                }
             }
 
-            const data = await response.json();
+            if (!data) {
+                throw new Error(`Could not reach LM Studio at ${baseUrl}. Make sure LM Studio is running.`);
+            }
+
             models = (data.data || []).map(
                 (m: { id: string; type?: string; state?: string; arch?: string }) => ({
                     id: m.id,

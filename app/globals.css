@@ -199,6 +199,58 @@ body {
   background: rgba(74, 158, 255, 0.05);
 }
 
+.btn-randomize {
+  background: linear-gradient(135deg, #9944ff 0%, #ff44aa 100%);
+  color: #fff;
+  font-size: 1rem;
+  padding: 12px 24px;
+}
+
+.btn-randomize:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(153, 68, 255, 0.4);
+}
+
+.btn-cancel {
+  background: transparent;
+  color: var(--accent-red);
+  border: 2px solid var(--accent-red);
+  font-size: 1rem;
+  padding: 12px 28px;
+  animation: cancelPulse 1.5s ease-in-out infinite;
+}
+
+.btn-cancel:hover {
+  background: rgba(239, 68, 68, 0.15);
+  transform: translateY(-2px);
+}
+
+@keyframes cancelPulse {
+
+  0%,
+  100% {
+    border-color: var(--accent-red);
+  }
+
+  50% {
+    border-color: rgba(239, 68, 68, 0.4);
+  }
+}
+
+.generating-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(74, 158, 255, 0.06);
+  border: 1px solid rgba(74, 158, 255, 0.15);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  animation: fadeIn 0.3s ease;
+}
+
 /* ── Main Content ──────────────────────────────────────── */
 .main-content {
   flex: 1;
@@ -903,6 +955,14 @@ body {
 .form-group label {
   display: flex;
   align-items: center;
+}
+
+.model-count {
+  font-size: 0.68rem;
+  color: var(--accent-green, #44cc88);
+  margin-left: 6px;
+  font-weight: 500;
+  opacity: 0.8;
 }
 
 /* Settings Action Buttons */
