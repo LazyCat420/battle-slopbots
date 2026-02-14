@@ -20,6 +20,7 @@ import {
 	type AssemblyAttachmentReq,
 	assembleBot as assembleBotAPI,
 	checkHealth,
+	paintBot as paintBotAPI,
 	pipelineFileUrl,
 } from "@/lib/3d/pipeline-client";
 import "./assemble.css";
@@ -83,7 +84,9 @@ export default function AssemblePage() {
 	const [attachments, setAttachments] = useState<Attachment[]>([]);
 	const [outputName, setOutputName] = useState("assembled_bot");
 	const [autoRig, setAutoRig] = useState(false);
+	const [autoPaint, setAutoPaint] = useState(true);
 	const [assembling, setAssembling] = useState(false);
+	const [painting, setPainting] = useState(false);
 	const [result, setResult] = useState<AssembleResult | null>(null);
 	const [status, setStatus] = useState<{
 		msg: string;
@@ -279,6 +282,7 @@ export default function AssemblePage() {
 				attachments: attReqs,
 				output_name: outputName,
 				auto_rig: autoRig,
+				auto_paint: autoPaint,
 			};
 
 			addLog(
@@ -312,6 +316,7 @@ export default function AssemblePage() {
 		attachments,
 		outputName,
 		autoRig,
+		autoPaint,
 		addLog,
 		loadGLB,
 	]);
@@ -325,6 +330,44 @@ export default function AssemblePage() {
 		a.download = `${outputName}.glb`;
 		a.click();
 	}, [result, outputName]);
+
+	// ── Paint Texture ──
+	const handlePaint = useCallback(async () => {
+		if (!result) return;
+		const query = prompt("Enter a search query for the texture reference image:\n(e.g. 'robot metal texture', 'wooden mech')");
+		if (!query) return;
+
+		setPainting(true);
+		setStatus({ msg: "🎨 Applying AI textures...", type: "info" });
+		addLog(`Paint started with query: ${query}`);
+
+		try {
+			const paintResult = await paintBotAPI(result.merged_path, {
+				searchQuery: query,
+				outputName: `${outputName}_painted`,
+			});
+
+			setStatus({
+				msg: `🎨 Texture applied! ${paintResult.elapsed}s, ${(paintResult.file_size / 1024).toFixed(1)}KB`,
+				type: "success",
+			});
+			addLog(`Painted in ${paintResult.elapsed}s`);
+
+			// Reload the textured GLB into the viewer
+			loadGLB(pipelineFileUrl(paintResult.painted_path));
+
+			// Update result path to painted version
+			setResult((prev) =>
+				prev ? { ...prev, merged_path: paintResult.painted_path, file_size: paintResult.file_size } : prev,
+			);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			setStatus({ msg: `Paint failed: ${msg}`, type: "error" });
+			addLog(`PAINT ERROR: ${msg}`);
+		} finally {
+			setPainting(false);
+		}
+	}, [result, outputName, addLog, loadGLB]);
 
 	return (
 		<div className="assemble-page">
@@ -561,6 +604,17 @@ export default function AssemblePage() {
 							</label>
 						</div>
 
+						<div className="asm-field">
+							<label>
+								<input
+									type="checkbox"
+									checked={autoPaint}
+									onChange={(e) => setAutoPaint(e.target.checked)}
+								/>{" "}
+								Auto-paint textures after assembly (Hunyuan3D-Paint)
+							</label>
+						</div>
+
 						<div className="btn-row">
 							<button
 								type="button"
@@ -586,6 +640,24 @@ export default function AssemblePage() {
 									💾 Download GLB
 								</button>
 							)}
+
+						{result && (
+							<button
+								type="button"
+								className="asm-btn asm-btn-secondary"
+								disabled={painting}
+								onClick={handlePaint}
+								title="Apply AI-generated textures using Hunyuan3D-Paint"
+							>
+								{painting ? (
+									<>
+										<span className="spinner" /> Painting...
+									</>
+								) : (
+									"🎨 Paint Texture"
+								)}
+							</button>
+						)}
 						</div>
 
 						{status && (

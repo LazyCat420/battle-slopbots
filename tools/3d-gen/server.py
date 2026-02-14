@@ -17,7 +17,6 @@ Usage:
     uvicorn server:app --host 0.0.0.0 --port 8100 --reload
 """
 
-
 import logging
 import os
 import subprocess
@@ -35,6 +34,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
+
+# ── Windows CUDA DLL fix (must be before CUDA extension imports) ──
+_cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0")
+_cuda_bin = os.path.join(_cuda_path, "bin")
+if os.path.isdir(_cuda_bin) and hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(_cuda_bin)
+
 
 # ── Logging ──────────────────────────────────────────────
 
@@ -121,11 +127,13 @@ def unload_triposg():
     """Free TripoSG from VRAM when needed by other models."""
     global triposg_pipe, rmbg_net
     if triposg_pipe is not None or rmbg_net is not None:
+        import gc
         import torch
 
         del triposg_pipe, rmbg_net
         triposg_pipe = None
         rmbg_net = None
+        gc.collect()
         torch.cuda.empty_cache()
         log.info("TripoSG unloaded, VRAM freed")
 
@@ -187,18 +195,68 @@ def get_hunyuan3d_text2img():
 def unload_hunyuan3d():
     """Free Hunyuan3D from VRAM when needed by other models."""
     global hunyuan3d_pipe, hunyuan3d_text2img
+    import gc
     import torch
 
+    freed = False
     if hunyuan3d_pipe is not None:
         del hunyuan3d_pipe
         hunyuan3d_pipe = None
+        freed = True
         log.info("Hunyuan3D shape model unloaded")
     if hunyuan3d_text2img is not None:
         del hunyuan3d_text2img
         hunyuan3d_text2img = None
+        freed = True
         log.info("HunyuanDiT text2img unloaded")
-    torch.cuda.empty_cache()
-    log.info("VRAM freed")
+    if freed:
+        gc.collect()
+        torch.cuda.empty_cache()
+        log.info("VRAM freed")
+
+
+# ── Hunyuan3D-Paint lazy loading ─────────────────────────
+
+hunyuan3d_paint = None
+
+
+def get_hunyuan3d_paint():
+    """Lazy-load Hunyuan3D texture painting pipeline on first use."""
+    global hunyuan3d_paint
+    if hunyuan3d_paint is not None:
+        return hunyuan3d_paint
+
+    try:
+        from hy3dgen.texgen import Hunyuan3DPaintPipeline
+
+        log.info(f"Loading Hunyuan3D-Paint texture pipeline: {HUNYUAN3D_MODEL_ID}...")
+        hunyuan3d_paint = Hunyuan3DPaintPipeline.from_pretrained(
+            HUNYUAN3D_MODEL_ID,
+        )
+        log.info("Hunyuan3D-Paint loaded")
+        return hunyuan3d_paint
+    except ImportError as e:
+        log.warning(f"Hunyuan3D-Paint not installed — texture gen unavailable: {e}")
+        return None
+    except Exception as e:
+        log.error(f"Hunyuan3D-Paint load failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def unload_hunyuan3d_paint():
+    """Free Hunyuan3D-Paint from VRAM."""
+    global hunyuan3d_paint
+    import gc
+    import torch
+
+    if hunyuan3d_paint is not None:
+        del hunyuan3d_paint
+        hunyuan3d_paint = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        log.info("Hunyuan3D-Paint unloaded, VRAM freed")
 
 
 # ── App ──────────────────────────────────────────────────
@@ -261,6 +319,15 @@ class RigRequest(BaseModel):
     output_name: str = "rigged_bot"
 
 
+class PaintRequest(BaseModel):
+    """Request for /paint — texture a GLB mesh."""
+
+    glb_path: str  # web path like /parts/generated/assembled_bot.glb
+    image_path: str = ""  # optional reference image for texture guidance
+    search_query: str = ""  # search for reference image if no image_path
+    output_name: str = "painted_bot"
+
+
 class SearchImageRequest(BaseModel):
     """Request for /search-image — search + background removal."""
 
@@ -293,6 +360,8 @@ class AssembleRequest(BaseModel):
     attachments: list[AttachmentPart] = []
     output_name: str = "assembled_bot"
     auto_rig: bool = False  # Whether to auto-rig after merge
+    auto_paint: bool = True  # Whether to auto-paint textures after merge
+    paint_search_query: str = ""  # Custom search query for paint reference
     num_inference_steps: int = 50
     guidance_scale: float = 7.0
 
@@ -549,7 +618,8 @@ def _generate_hunyuan3d(
     mesh.export(str(output_path))
     log.info(f"Saved GLB: {output_path} ({os.path.getsize(output_path)} bytes)")
 
-    return {
+    # Include ref image path if we generated one from text
+    result = {
         "part_id": part_id,
         "glb_path": f"/parts/generated/{part_id}.glb",
         "vertices": len(mesh.vertices),
@@ -557,6 +627,13 @@ def _generate_hunyuan3d(
         "elapsed_s": round(elapsed, 2),
         "engine": "hunyuan3d",
     }
+    if prompt and image is not None:
+        # Save ref image for painting (if text-to-image path was used)
+        paint_ref_id = f"paintref_{part_id}"
+        paint_ref_path = OUTPUT_DIR / f"{paint_ref_id}.png"
+        image.save(str(paint_ref_path))
+        result["ref_image_path"] = f"/parts/generated/{paint_ref_id}.png"
+    return result
 
 
 # ── POST /generate-text — Text → 3D Mesh (Hunyuan3D) ────
@@ -760,6 +837,8 @@ async def assemble_bot(req: AssembleRequest):
             unload_triposg()  # Free VRAM for Hunyuan3D
             base_result = _generate_hunyuan3d(prompt=req.base_text_prompt)
             base_path = OUTPUT_DIR / f"{base_result['part_id']}.glb"
+            # Save ref image path for auto-paint later
+            base_ref_image = base_result.get("ref_image_path", "")
             generated_parts.append({"role": "base", **base_result})
         else:
             # Image-to-3D via TripoSG (default) or Hunyuan3D
@@ -858,6 +937,10 @@ async def assemble_bot(req: AssembleRequest):
 
             positioned_meshes.append(att_mesh)
 
+        # ── Unload shape models before merge — not needed anymore ──
+        unload_hunyuan3d()
+        unload_triposg()
+
         # ── Step 3: Merge all parts ──
         log.info(f"Merging {len(positioned_meshes)} meshes...")
         merged = trimesh.util.concatenate(positioned_meshes)
@@ -885,6 +968,35 @@ async def assemble_bot(req: AssembleRequest):
             except Exception as rig_err:
                 log.warning(f"Auto-rigging failed (non-fatal): {rig_err}")
                 result["rig_error"] = str(rig_err)
+
+        # ── Step 5: Optional auto-paint (non-fatal) ──
+        if req.auto_paint:
+            try:
+                # Prefer the generated reference image over searching the web
+                paint_image = locals().get("base_ref_image", "")
+                paint_query = (
+                    req.paint_search_query
+                    or req.base_description
+                    or "3D robot texture material"
+                )
+                if paint_image:
+                    log.info(f"Auto-painting with generated ref image: {paint_image}")
+                else:
+                    log.info(f"Auto-painting with search query: {paint_query}")
+                paint_result = await paint_bot(PaintRequest(
+                    glb_path=result["merged_path"],
+                    image_path=paint_image,
+                    search_query=paint_query if not paint_image else "",
+                    output_name=f"{req.output_name}_painted",
+                ))
+                result["painted"] = paint_result
+                # Update merged_path to the painted version
+                result["merged_path"] = paint_result["painted_path"]
+                result["file_size"] = paint_result["file_size"]
+                log.info(f"Auto-paint complete: {paint_result['elapsed']}s")
+            except Exception as paint_err:
+                log.warning(f"Auto-painting failed (non-fatal): {paint_err}")
+                result["paint_error"] = str(paint_err)
 
         return result
 
@@ -1071,6 +1183,123 @@ async def rig_bot(req: RigRequest):
     except Exception as e:
         log.error(f"Rigging failed: {e}")
         raise HTTPException(500, f"Rigging failed: {str(e)}")
+
+
+# ── POST /paint — Texture via Hunyuan3D-Paint ────────────
+
+
+@app.post("/paint")
+async def paint_bot(req: PaintRequest):
+    """Apply AI-generated textures to a GLB mesh using Hunyuan3D-Paint."""
+    # Resolve GLB path (web path → disk path)
+    raw_path = req.glb_path.lstrip("/")
+    glb_path = PROJECT_ROOT / "public" / raw_path
+    if not glb_path.exists():
+        glb_path = PROJECT_ROOT / raw_path
+    if not glb_path.exists():
+        raise HTTPException(404, f"GLB not found: {req.glb_path}")
+
+    log.info(f"Painting: {glb_path}")
+
+    try:
+        # Get or find a reference image for texture guidance
+        ref_image = None
+        if req.image_path:
+            img_path = PROJECT_ROOT / "public" / req.image_path.lstrip("/")
+            if not img_path.exists():
+                img_path = PROJECT_ROOT / req.image_path.lstrip("/")
+            if img_path.exists():
+                ref_image = Image.open(img_path).convert("RGBA")
+                log.info(f"Using reference image: {img_path}")
+
+        if ref_image is None and req.search_query:
+            search_result = await search_image(SearchImageRequest(
+                query=req.search_query, remove_bg=True
+            ))
+            found_path = search_result.get("image_path", "")
+            if found_path:
+                img_path = PROJECT_ROOT / "public" / found_path.lstrip("/")
+                if not img_path.exists():
+                    img_path = PROJECT_ROOT / found_path.lstrip("/")
+                if img_path.exists():
+                    ref_image = Image.open(img_path).convert("RGBA")
+                    log.info(f"Using searched image: {img_path}")
+
+        if ref_image is None:
+            # Generate a default reference from the mesh description
+            raise HTTPException(
+                400,
+                "No reference image provided. Please supply image_path or search_query "
+                "for texture guidance.",
+            )
+
+        # Free shape model VRAM — paint model needs ~10GB
+        unload_hunyuan3d()
+        unload_triposg()
+
+        # Load paint pipeline
+        paint_pipe = get_hunyuan3d_paint()
+        if paint_pipe is None:
+            raise HTTPException(503, "Hunyuan3D-Paint not available")
+
+        # Load mesh
+        loaded = trimesh.load(str(glb_path))
+        mesh = extract_single_mesh(loaded)
+        log.info(
+            f"Loaded mesh for painting: {len(mesh.vertices)} verts, "
+            f"{len(mesh.faces)} faces"
+        )
+
+        # Decimate if too large — paint pipeline struggles with >50K faces
+        MAX_PAINT_FACES = 50_000
+        if len(mesh.faces) > MAX_PAINT_FACES:
+            log.info(
+                f"Mesh too large for painting ({len(mesh.faces)} faces), "
+                f"decimating to {MAX_PAINT_FACES}..."
+            )
+            try:
+                mesh = mesh.simplify_quadric_decimation(
+                    face_count=MAX_PAINT_FACES
+                )
+                log.info(
+                    f"Decimated mesh: {len(mesh.vertices)} verts, "
+                    f"{len(mesh.faces)} faces"
+                )
+            except Exception as dec_err:
+                log.warning(f"Decimation failed, using original: {dec_err}")
+
+        # Run texture generation
+        t0 = time.time()
+        log.info("Running Hunyuan3D-Paint texture generation...")
+        textured_mesh = paint_pipe(mesh, image=ref_image)
+        elapsed = time.time() - t0
+        log.info(f"Texture generation complete: {elapsed:.1f}s")
+
+        # Export textured GLB
+        output_path = OUTPUT_DIR / f"{req.output_name}.glb"
+        textured_mesh.export(str(output_path))
+        file_size = os.path.getsize(output_path)
+        log.info(f"Saved textured GLB: {output_path} ({file_size} bytes)")
+
+        # Free paint model VRAM immediately — it's huge (~10GB)
+        unload_hunyuan3d_paint()
+
+        return {
+            "painted_path": f"/parts/generated/{req.output_name}.glb",
+            "file_size": file_size,
+            "elapsed": round(elapsed, 1),
+            "reference_image": req.image_path or req.search_query,
+        }
+
+    except HTTPException:
+        unload_hunyuan3d_paint()
+        raise
+    except Exception as e:
+        unload_hunyuan3d_paint()
+        log.error(f"Painting failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Painting failed: {str(e)}")
 
 
 # ── Static file serving for generated parts ──────────────

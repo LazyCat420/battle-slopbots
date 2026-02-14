@@ -85,6 +85,8 @@ export interface AssembleRequest {
 	attachments: AssemblyAttachmentReq[];
 	output_name?: string;
 	auto_rig?: boolean;
+	auto_paint?: boolean;
+	paint_search_query?: string;
 }
 
 export interface AssembleResult {
@@ -199,6 +201,40 @@ export async function rigBot(
 		body: JSON.stringify({ glb_path: glbPath, output_name: outputName }),
 	});
 	if (!resp.ok) throw new Error(`Rigging failed: ${resp.statusText}`);
+	return resp.json();
+}
+
+// ── Paint types ─────────────────────────────────────────
+
+export interface PaintResult {
+	painted_path: string;
+	file_size: number;
+	elapsed: number;
+	reference_image: string;
+}
+
+export async function paintBot(
+	glbPath: string,
+	opts?: {
+		imagePath?: string;
+		searchQuery?: string;
+		outputName?: string;
+	},
+): Promise<PaintResult> {
+	const resp = await fetch(`${PIPELINE_URL}/paint`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			glb_path: glbPath,
+			image_path: opts?.imagePath ?? "",
+			search_query: opts?.searchQuery ?? "",
+			output_name: opts?.outputName ?? "painted_bot",
+		}),
+	});
+	if (!resp.ok) {
+		const body = await resp.text();
+		throw new Error(`Painting failed: ${body}`);
+	}
 	return resp.json();
 }
 
